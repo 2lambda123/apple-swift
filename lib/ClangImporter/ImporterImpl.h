@@ -668,6 +668,8 @@ private:
       clonedBaseMembers;
 
 public:
+  llvm::DenseMap<const clang::ParmVarDecl*, FuncDecl*> defaultArgGenerators;
+
   ValueDecl *importBaseMemberDecl(ValueDecl *decl, DeclContext *newContext);
 
   static size_t getImportedBaseMemberDeclArity(const ValueDecl *valueDecl);
@@ -1988,6 +1990,10 @@ inline std::string getPrivateOperatorName(const std::string &OperatorToken) {
 #include "clang/Basic/OperatorKinds.def"
   return "None";
 }
+
+bool hasUnsafeAPIAttr(const clang::Decl *decl);
+
+bool isViewType(const clang::CXXRecordDecl *decl);
 
 }
 }

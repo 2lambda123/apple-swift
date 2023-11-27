@@ -719,6 +719,26 @@ static bool isEmittedOnDemand(SILModule &M, SILDeclRef constant) {
   }
   case SILDeclRef::Kind::EnumElement:
     return true;
+  case SILDeclRef::Kind::DefaultArgGenerator: {
+    // Default arguments of C++ functions are only emitted is used.
+    auto funcDecl = constant.getFuncDecl();
+    if (funcDecl) {
+      // If the function is inherited from a base C++ class, we have synthesized
+      // a new Swift function that dispatches to the base method and has no
+      // clang node: the underlying clang decl is synthesized lazily. This means
+      // we can't rely on `funcDecl->hasClangNode()` here. Instead, check if any
+      // of the parameters has a clang node.
+      auto params = funcDecl->getParameters();
+      if (params->size() > 0) {
+        auto paramDecl = params->get(0);
+        if (paramDecl->hasClangNode() &&
+            isa_and_nonnull<clang::ParmVarDecl>(paramDecl->getClangDecl()))
+          return true;
+      }
+    }
+
+    break;
+  }
   default:
     break;
   }

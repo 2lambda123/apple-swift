@@ -17,6 +17,7 @@
 #include "CFTypeInfo.h"
 #include "ClangDiagnosticConsumer.h"
 #include "ImporterImpl.h"
+#include "SwiftDeclSynthesizer.h"
 #include "swift/ABI/MetadataValues.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Decl.h"
@@ -42,6 +43,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjCCommon.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/TypeVisitor.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Lex/Preprocessor.h"
@@ -2483,6 +2485,59 @@ static ParamDecl *getParameterInfo(ClangImporter::Implementation *impl,
                               : ParamSpecifier::Default);
   paramInfo->setInterfaceType(swiftParamTy);
   impl->recordImplicitUnwrapForDecl(paramInfo, isParamTypeImplicitlyUnwrapped);
+
+  // Import the default expression for this parameter if possible.
+  // Swift doesn't support default values of inout parameters.
+  if (param->hasDefaultArg() && !isInOut &&
+      impl->isCxxInteropCompatVersionAtLeast(
+          version::getUpcomingCxxInteropCompatVersion())) {
+    bool isSafeToImport = true;
+    // If the argument is explicitly marked as import_unsafe, import its default
+    // expression.
+    if (!hasUnsafeAPIAttr(param)) {
+      // Try to instantiate the default expression.
+      auto functionDecl = cast<clang::FunctionDecl>(param->getDeclContext());
+      auto defaultArgExprResult = impl->getClangSema().BuildCXXDefaultArgExpr(
+          clang::SourceLocation(),
+          const_cast<clang::FunctionDecl *>(functionDecl),
+          const_cast<clang::ParmVarDecl *>(param));
+      // If the default expression can't be instantiated, bail.
+      if (!defaultArgExprResult.isUsable())
+        isSafeToImport = false;
+
+      if (isSafeToImport) {
+        // If the type of this parameter is a view type, do not import the
+        // default expression, since we cannot guarantee the lifetime of the
+        // pointee value.
+        if (auto paramRecordDecl = param->getType()->getAsCXXRecordDecl()) {
+          isSafeToImport = !isViewType(paramRecordDecl);
+        }
+      }
+      if (isSafeToImport) {
+        auto defaultArgExpr =
+            cast<clang::CXXDefaultArgExpr>(defaultArgExprResult.get());
+        // If the parameter is a const reference, check if the expression
+        // creates temporaries. Since we import const T& as T in Swift, the
+        // value of the default expression will get copied in Swift unlike C++,
+        // which might be unexpected and unsafe.
+        if (param->getType()->isReferenceType() &&
+            param->getType()->getPointeeType().isConstQualified()) {
+          if (isa<clang::MaterializeTemporaryExpr>(defaultArgExpr->getExpr()))
+            isSafeToImport = false;
+        }
+      }
+    }
+
+    if (isSafeToImport) {
+      SwiftDeclSynthesizer synthesizer(*impl);
+      if (CallExpr *defaultArgExpr = synthesizer.makeDefaultArgument(
+              param, swiftParamTy, paramInfo->getParameterNameLoc())) {
+        paramInfo->setDefaultArgumentKind(DefaultArgumentKind::Normal);
+        paramInfo->setDefaultExpr(defaultArgExpr, /*isTypeChecked*/ true);
+        paramInfo->setDefaultValueStringRepresentation("cxxDefaultArg");
+      }
+    }
+  }
 
   return paramInfo;
 }
